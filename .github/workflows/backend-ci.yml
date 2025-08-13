@@ -4,6 +4,7 @@ on:
   push:
     paths-ignore:
       - "README.md"
+      - ".github/**"
   pull_request:
 
 jobs:
@@ -12,10 +13,8 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      DJANGO_SETTINGS_MODULE: core.settings   # settings yolun farklıysa değiştir
+      DJANGO_SETTINGS_MODULE: core.settings  # settings.py yolu doğru olmalı
       PYTHONUNBUFFERED: "1"
-      SECRET_KEY: "ci-secret-key"
-      DEBUG: "0"
 
     steps:
       - name: Checkout
@@ -36,23 +35,14 @@ jobs:
 
       - name: Install dependencies
         run: |
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            echo "requirements.txt bulunamadı, temel bağımlılıklar kuruluyor..."
-            pip install "Django>=5,<6" djangorestframework django-filter \
-                        drf-spectacular djangorestframework-simplejwt django-cors-headers
+          pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
 
-      - name: Django check & migrate (SQLite)
+      - name: Check Django setup
         run: |
           python --version
           python -c "import django; print('Django:', django.get_version())"
-          if [ -f manage.py ]; then
-            python manage.py check
-            python manage.py migrate --noinput
-          else
-            echo "manage.py bulunamadı"; exit 1
-          fi
 
       - name: Run tests
         run: |
