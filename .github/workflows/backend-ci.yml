@@ -1,0 +1,59 @@
+name: Backend CI
+
+on:
+  push:
+    paths-ignore:
+      - "README.md"
+      - ".github/**"
+  pull_request:
+
+jobs:
+  test:
+    name: Run Django tests
+    runs-on: ubuntu-latest
+
+    env:
+      # Çoğu MVP’de SQLite kullanıldığı için ekstra servise gerek yok.
+      # Eğer Postgres kullanıyorsan, DATABASE_URL gibi değişkenleri buraya ekleyebilirsin.
+      DJANGO_SETTINGS_MODULE: core.settings  # farklıysa değiştir
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+
+      - name: Check Django setup
+        run: |
+          python --version
+          python -c "import django; print('Django:', django.get_version())"
+
+      # Eğer manage.py içindeki default test runner’ı kullanıyorsan bu adım yeterli.
+      # Pytest kullanıyorsan aşağıdaki komutu pytest ile değiştir.
+      - name: Run tests
+        run: |
+          if [ -f manage.py ]; then
+            python manage.py test -v 2
+          elif command -v pytest >/dev/null 2>&1; then
+            pytest -q
+          else
+            echo "Ne manage.py ne de pytest bulundu. Lütfen test komutunu workflow'da netleştir."
+            exit 1
+          fi
