@@ -2,7 +2,8 @@ name: Backend CI
 
 on:
   push:
-    branches: [ "**" ]
+    paths-ignore:
+      - "README.md"
   pull_request:
 
 jobs:
@@ -11,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      DJANGO_SETTINGS_MODULE: core.settings   # settings modülün farklıysa değiştir
+      DJANGO_SETTINGS_MODULE: core.settings   # settings yolun farklıysa değiştir
       PYTHONUNBUFFERED: "1"
       SECRET_KEY: "ci-secret-key"
       DEBUG: "0"
@@ -40,8 +41,8 @@ jobs:
 
       - name: Django check & migrate (SQLite)
         run: |
-          python -V
-          python -c "import django; print('Django', django.get_version())"
+          python --version
+          python -c "import django; print('Django:', django.get_version())"
           if [ -f manage.py ]; then
             python manage.py check
             python manage.py migrate --noinput
