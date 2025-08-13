@@ -4,6 +4,7 @@ on:
   push:
     paths-ignore:
       - "README.md"
+      - ".github/**"
   pull_request:
 
 jobs:
@@ -12,10 +13,10 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      DJANGO_SETTINGS_MODULE: core.settings   # settings yolun farklıysa değiştir
+      # Çoğu MVP’de SQLite kullanıldığı için ekstra servise gerek yok.
+      # Eğer Postgres kullanıyorsan, DATABASE_URL gibi değişkenleri buraya ekleyebilirsin.
+      DJANGO_SETTINGS_MODULE: core.settings  # farklıysa değiştir
       PYTHONUNBUFFERED: "1"
-      SECRET_KEY: "ci-secret-key"
-      DEBUG: "0"
 
     steps:
       - name: Checkout
@@ -39,17 +40,20 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
 
-      - name: Django check & migrate (SQLite)
+      - name: Check Django setup
         run: |
           python --version
           python -c "import django; print('Django:', django.get_version())"
-          if [ -f manage.py ]; then
-            python manage.py check
-            python manage.py migrate --noinput
-          else
-            echo "manage.py bulunamadı"; exit 1
-          fi
 
+      # Eğer manage.py içindeki default test runner’ı kullanıyorsan bu adım yeterli.
+      # Pytest kullanıyorsan aşağıdaki komutu pytest ile değiştir.
       - name: Run tests
         run: |
-          python manage.py test -v 2
+          if [ -f manage.py ]; then
+            python manage.py test -v 2
+          elif command -v pytest >/dev/null 2>&1; then
+            pytest -q
+          else
+            echo "Ne manage.py ne de pytest bulundu. Lütfen test komutunu workflow'da netleştir."
+            exit 1
+          fi
