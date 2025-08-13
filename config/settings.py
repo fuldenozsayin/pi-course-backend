@@ -142,12 +142,15 @@ REST_FRAMEWORK = {
         "rest_framework.filters.SearchFilter",
         "rest_framework.filters.OrderingFilter",
     ],
-     "DEFAULT_THROTTLE_CLASSES": [
+    "DEFAULT_THROTTLE_CLASSES": [
         "core.throttling.LessonRequestThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {
-        # kullanıcı başına 1 saatte en fazla 5 talep
-        "lesson_request": "3000/hour",
+        # Örn: kullanıcı başına 1 saatte en fazla 5 ders talebi oluşturma
+        "lesson_request": "5/hour",
+        # Alternatifler:
+        # "lesson_request": "1/minute",
+        # "lesson_request": "20/day",
     },
 }
 
