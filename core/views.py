@@ -1,179 +1,228 @@
 # core/views.py
 from django.contrib.auth import get_user_model
-from django.db import models
-from django.db.models import F
-from django_filters.rest_framework import FilterSet, filters
-from rest_framework import generics, viewsets, mixins
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from django.db.models import Q
+from rest_framework import viewsets, mixins, permissions, generics, status
 from rest_framework.response import Response
+from rest_framework.exceptions import PermissionDenied
+from rest_framework.decorators import action
 from rest_framework_simplejwt.views import TokenObtainPairView
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiTypes
 
 from .models import Subject, LessonRequest
 from .serializers import (
     RegisterSerializer,
-    MeSerializer, MeUpdateSerializer,
     SubjectSerializer,
-    TutorMiniSerializer, TutorDetailSerializer,
-    LessonRequestCreateSerializer, LessonRequestListSerializer, LessonRequestStatusSerializer,
+    TutorMiniSerializer,
+    TutorDetailSerializer,
+    MeSerializer,
+    MeUpdateSerializer,
+    LessonRequestCreateSerializer,
+    LessonRequestListSerializer,
+    LessonRequestStatusSerializer,
 )
 
 User = get_user_model()
 
 
-# ---------- Auth ----------
-@extend_schema(description="Kullanıcı kaydı (role: student|tutor).")
+# -------------------------
+# Auth
+# -------------------------
 class RegisterView(generics.CreateAPIView):
+    """
+    POST /api/auth/register
+    body: { email, username, role: student|tutor, password }
+    """
     serializer_class = RegisterSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [permissions.AllowAny]
 
 
-class LoginSerializer(TokenObtainPairSerializer):
-    @classmethod
-    def get_token(cls, user):
-        token = super().get_token(user)
-        token["role"] = user.role
-        return token
-
-
-@extend_schema(description="JWT ile giriş. access/refresh döner.")
 class LoginView(TokenObtainPairView):
-    serializer_class = LoginSerializer
-    permission_classes = [AllowAny]
+    """
+    POST /api/auth/login
+    body: { email, password }
+    response: { access, refresh }
+    """
+    permission_classes = [permissions.AllowAny]
 
 
-# ---------- Me ----------
-@extend_schema(description="Oturum sahibi profili (GET). Kısmî güncelleme (PATCH).")
-class MeView(generics.RetrieveUpdateAPIView):
-    permission_classes = [IsAuthenticated]
+# -------------------------
+# Me (profil)
+# -------------------------
+class MeView(generics.GenericAPIView):
+    """
+    GET /api/me
+    PATCH /api/me
+    """
+    permission_classes = [permissions.IsAuthenticated]
 
-    def get_object(self):
-        return self.request.user
+    def get(self, request):
+        # N+1 önleme: profil ve subjects'i tek hamlede getir
+        user = (
+            User.objects.filter(id=request.user.id)
+            .select_related("tutorprofile", "studentprofile")
+            .prefetch_related("tutorprofile__subjects")
+            .get()
+        )
+        return Response(MeSerializer(user).data)
 
-    def get_serializer_class(self):
-        return MeUpdateSerializer if self.request.method in ("PUT", "PATCH") else MeSerializer
+    def patch(self, request):
+        ser = MeUpdateSerializer(data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        ser.update(request.user, ser.validated_data)
+
+        # Güncel değeri optimize şekilde tekrar oku
+        user = (
+            User.objects.filter(id=request.user.id)
+            .select_related("tutorprofile", "studentprofile")
+            .prefetch_related("tutorprofile__subjects")
+            .get()
+        )
+        return Response(MeSerializer(user).data, status=status.HTTP_200_OK)
 
 
-# ---------- Subject ----------
-class SubjectViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
+# -------------------------
+# Subject
+# -------------------------
+class SubjectViewSet(mixins.ListModelMixin,
+                     mixins.RetrieveModelMixin,
+                     viewsets.GenericViewSet):
+    """
+    GET /api/subjects
+    GET /api/subjects/{id}
+    """
     queryset = Subject.objects.all().order_by("name")
     serializer_class = SubjectSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [permissions.AllowAny]
+    lookup_field = "id"
 
 
-# ---------- Tutor list/detail + filtre/arama/sıralama ----------
-class TutorFilter(FilterSet):
-    subject = filters.NumberFilter(method="filter_subject")
-    search = filters.CharFilter(method="filter_search")
+# -------------------------
+# Tutors
+# -------------------------
+class TutorViewSet(mixins.ListModelMixin,
+                   mixins.RetrieveModelMixin,
+                   viewsets.GenericViewSet):
+    """
+    GET /api/tutors?subject=<id>&ordering=-rating&search=<q>
+    GET /api/tutors/{id}
+    """
+    permission_classes = [permissions.AllowAny]
+    lookup_field = "id"
 
-    class Meta:
-        model = User
-        fields = []
-
-    def filter_subject(self, qs, name, value):
-        return qs.filter(tutorprofile__subjects__id=value)
-
-    def filter_search(self, qs, name, value):
-        return qs.filter(
-            models.Q(first_name__icontains=value)
-            | models.Q(last_name__icontains=value)
-            | models.Q(tutorprofile__bio__icontains=value)
-        )
-
-
-class TutorViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
-    permission_classes = [AllowAny]
-    queryset = (
-        User.objects.filter(role="tutor")
-        .select_related("tutorprofile")
-        .prefetch_related("tutorprofile__subjects")
-    )
-    filterset_class = TutorFilter
-    search_fields = ["first_name", "last_name", "tutorprofile__bio"]
-    ordering_fields = ["rating", "hourly_rate"]
-    ordering = ["-rating"]
-
-    # rating/hourly_rate alias'ları
     def get_queryset(self):
-        return super().get_queryset().annotate(
-            rating=F("tutorprofile__rating"),
-            hourly_rate=F("tutorprofile__hourly_rate"),
+        """
+        N+1 önleme:
+        - O2O: tutorprofile -> select_related
+        - M2M: tutorprofile.subjects -> prefetch_related
+        """
+        qs = (
+            User.objects.filter(role="tutor")
+            .select_related("tutorprofile")
+            .prefetch_related("tutorprofile__subjects")
         )
+
+        # Filtreler
+        subject_id = self.request.query_params.get("subject")
+        if subject_id:
+            qs = qs.filter(tutorprofile__subjects__id=subject_id)
+
+        search = self.request.query_params.get("search")
+        if search:
+            qs = qs.filter(
+                Q(username__icontains=search)
+                | Q(first_name__icontains=search)
+                | Q(last_name__icontains=search)
+                | Q(email__icontains=search)
+                | Q(tutorprofile__bio__icontains=search)
+            )
+
+        # Sıralama (güvenli harita)
+        requested = self.request.query_params.get("ordering") or "-rating"
+        safe_order_map = {
+            "rating": "tutorprofile__rating",
+            "-rating": "-tutorprofile__rating",
+            "hourly_rate": "tutorprofile__hourly_rate",
+            "-hourly_rate": "-tutorprofile__hourly_rate",
+            "id": "id",
+            "-id": "-id",
+        }
+        ordering = safe_order_map.get(requested, "-tutorprofile__rating")
+        return qs.order_by(ordering).distinct()
 
     def get_serializer_class(self):
-        return TutorDetailSerializer if self.action == "retrieve" else TutorMiniSerializer
-
-    @extend_schema(
-        parameters=[
-            OpenApiParameter(name="subject", description="Subject ID", required=False, type=int),
-            OpenApiParameter(name="search", description="Ad/Bio arama", required=False, type=str),
-            OpenApiParameter(
-                name="ordering",
-                description="Sıralama: rating | -rating | hourly_rate | -hourly_rate",
-                required=False,
-                type=str,
-            ),
-        ],
-        description="Eğitmen listesi. Filtre: subject, Arama: search, Sıralama: ordering (örn. -rating).",
-    )
-    def list(self, request, *args, **kwargs):
-        return super().list(request, *args, **kwargs)
+        if self.action == "retrieve":
+            return TutorDetailSerializer
+        return TutorMiniSerializer
 
 
-# ---------- LessonRequest list/create/update ----------
-class LessonRequestViewSet(
-    viewsets.GenericViewSet, mixins.CreateModelMixin, mixins.ListModelMixin, mixins.UpdateModelMixin
-):
-    queryset = LessonRequest.objects.all().select_related("student", "tutor", "subject")
-    permission_classes = [IsAuthenticated]
+# -------------------------
+# Lesson Requests
+# -------------------------
+class LessonRequestViewSet(mixins.ListModelMixin,
+                           mixins.CreateModelMixin,
+                           mixins.RetrieveModelMixin,
+                           mixins.UpdateModelMixin,
+                           viewsets.GenericViewSet):
+    """
+    GET /api/lesson-requests?role=student|tutor&status=pending|approved|rejected
+    POST /api/lesson-requests
+    PATCH /api/lesson-requests/{id} (sadece ilgili tutor status günceller)
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    lookup_field = "id"
+
+    def get_queryset(self):
+        """
+        N+1 önleme:
+        - FK: student, tutor, subject -> select_related
+        """
+        base = LessonRequest.objects.select_related("student", "tutor", "subject")
+
+        user = self.request.user
+        role_q = self.request.query_params.get("role")
+
+        # Kendi perspektifine göre daralt
+        if role_q == "student" or user.role == "student":
+            qs = base.filter(student=user)
+        elif role_q == "tutor" or user.role == "tutor":
+            qs = base.filter(tutor=user)
+        else:
+            # admin değilse yine kendi kayıtlarını görsün
+            qs = base.filter(Q(student=user) | Q(tutor=user))
+
+        status_q = self.request.query_params.get("status")
+        if status_q:
+            qs = qs.filter(status=status_q)
+
+        return qs.order_by("-created_at")
 
     def get_serializer_class(self):
         if self.action == "create":
             return LessonRequestCreateSerializer
-        if self.action in ("partial_update", "update"):
+        if self.action in ("update", "partial_update"):
             return LessonRequestStatusSerializer
         return LessonRequestListSerializer
 
-    def get_queryset(self):
-        user = self.request.user
-        role = self.request.query_params.get("role")
-        status_q = self.request.query_params.get("status")
-
-        qs = super().get_queryset()
-        if role == "student" or (not role and user.role == "student"):
-            qs = qs.filter(student=user)
-        elif role == "tutor" or (not role and user.role == "tutor"):
-            qs = qs.filter(tutor=user)
-        else:
-            qs = qs.none()
-
-        if status_q:
-            qs = qs.filter(status=status_q)
-        return qs
-
-    def perform_create(self, serializer):
-        if self.request.user.role != "student":
-            # 403 döndürmek için ValidationError yerine PermissionError control ediyoruz
-            from rest_framework.exceptions import PermissionDenied
-
-            raise PermissionDenied("Only students can create lesson requests.")
+    def perform_update(self, serializer):
+        """
+        Status güncelleme yetkisi: sadece ilgili 'tutor' kullanıcı.
+        """
+        instance = self.get_object()
+        if self.request.user != instance.tutor:
+            raise PermissionDenied("Only the related tutor can update the status.")
         serializer.save()
 
-    def partial_update(self, request, *args, **kwargs):
+    # Opsiyonel: ayrı bir status endpoint'i de istersen
+    @action(methods=["patch"], detail=True, url_path="status")
+    def set_status(self, request, id=None):
         instance = self.get_object()
-        if request.user.role != "tutor" or instance.tutor_id != request.user.id:
-            return Response({"detail": "Only the assigned tutor can change status."}, status=403)
-        return super().partial_update(request, *args, **kwargs)
-
-    @extend_schema(
-        parameters=[
-            OpenApiParameter(name="role", description="Görünüm: student | tutor", required=False, type=OpenApiTypes.STR),
-            OpenApiParameter(
-                name="status", description="Durum: pending | approved | rejected", required=False, type=OpenApiTypes.STR
-            ),
-        ],
-        description="Oturum sahibinin talepleri. Öğrenciyse kendi gönderdiği; eğitmense kendisine gelen talepler.",
-    )
-    def list(self, request, *args, **kwargs):
-        return super().list(request, *args, **kwargs)
+        if request.user != instance.tutor:
+            raise PermissionDenied("Only the related tutor can update the status.")
+        ser = LessonRequestStatusSerializer(instance, data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        # Güncel kaydı select_related ile geri gönder
+        refreshed = (
+            LessonRequest.objects.select_related("student", "tutor", "subject")
+            .get(id=instance.id)
+        )
+        return Response(LessonRequestListSerializer(refreshed).data, status=status.HTTP_200_OK)
