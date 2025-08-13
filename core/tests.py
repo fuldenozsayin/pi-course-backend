@@ -32,10 +32,14 @@ class AuthAndLessonFlowTests(APITestCase):
     @classmethod
     def setUpTestData(cls):
         cls.subject = Subject.objects.create(name="Physics")
-
     def register(self, email: str, password: str, role: str):
         url = "/api/auth/register"
-        payload = {"email": email, "password": password, "role": role}
+        payload = {
+        "username": email.split("@")[0],  # basitçe email’den username türetiyoruz
+        "email": email,
+        "password": password,
+        "role": role
+    }
         res = self.client.post(url, payload, format="json")
         self.assertIn(res.status_code, (status.HTTP_200_OK, status.HTTP_201_CREATED), msg=res.data)
         return res
