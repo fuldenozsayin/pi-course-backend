@@ -3,12 +3,17 @@ from django.utils import timezone
 from django.contrib.auth import get_user_model
 from rest_framework.test import APITestCase
 from rest_framework import status
+from rest_framework.test import APIClient
+from django.core.cache import cache
 
 from .models import Subject, TutorProfile, StudentProfile, LessonRequest
 
 User = get_user_model()
 
-
+class AuthAndLessonFlowTests(APITestCase):
+    def setUp(self):
+        cache.clear()
+        
 # Basit smoke test (CI tetik testi)
 class SmokeTest(TestCase):
     def test_truth(self):
@@ -33,7 +38,7 @@ class AuthAndLessonFlowTests(APITestCase):
     def setUpTestData(cls):
         cls.subject = Subject.objects.create(name="Physics")
     def register(self, email: str, password: str, role: str):
-        url = "/api/auth/register"
+        url = "/api/auth/register/"
         payload = {
         "username": email.split("@")[0],  # basitçe email’den username türetiyoruz
         "email": email,
@@ -45,7 +50,7 @@ class AuthAndLessonFlowTests(APITestCase):
         return res
 
     def login(self, email: str, password: str) -> str:
-        url = "/api/auth/login"
+        url = "/api/auth/login/"
         payload = {"email": email, "password": password}
         res = self.client.post(url, payload, format="json")
         self.assertEqual(res.status_code, status.HTTP_200_OK, msg=res.data)
@@ -83,7 +88,7 @@ class AuthAndLessonFlowTests(APITestCase):
         }
 
         auth(self.client, student_token)
-        res_create = self.client.post("/api/lesson-requests", payload, format="json")
+        res_create = self.client.post("/api/lesson-requests/", payload, format="json")
         self.assertEqual(res_create.status_code, status.HTTP_201_CREATED, msg=res_create.data)
         lr_id = res_create.data["id"]
 
@@ -124,7 +129,7 @@ class AuthAndLessonFlowTests(APITestCase):
         }
 
         auth(self.client, student_token)
-        res_create = self.client.post("/api/lesson-requests", payload, format="json")
+        res_create = self.client.post("/api/lesson-requests/", payload, format="json")
         self.assertEqual(res_create.status_code, status.HTTP_201_CREATED)
         lr_id = res_create.data["id"]
 
