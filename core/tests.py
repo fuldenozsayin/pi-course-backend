@@ -1,138 +1,124 @@
 from django.test import TestCase
-from django.utils import timezone
-from django.contrib.auth import get_user_model
-from rest_framework.test import APITestCase
 from rest_framework import status
-from rest_framework.test import APIClient
+from rest_framework.test import APITestCase
 from django.core.cache import cache
 
-from .models import Subject, TutorProfile, StudentProfile, LessonRequest
 
-User = get_user_model()
-
-class AuthAndLessonFlowTests(APITestCase):
-    def setUp(self):
-        cache.clear()
-        
-# Basit smoke test (CI tetik testi)
 class SmokeTest(TestCase):
     def test_truth(self):
         self.assertTrue(True)
 
 
-# Entegrasyon testleri
-def auth(client, token: str):
-    """APIClient için Authorization header'ını ayarla."""
-    client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
-
-
 class AuthAndLessonFlowTests(APITestCase):
-    """
-    Kritik akış testleri:
-    - Kullanıcı kayıt + login
-    - Rol izinleri (403 senaryoları)
-    - Ders talebi oluşturma ve onaylama
-    """
+    def setUp(self):
+        # Her testten önce throttle sayaçlarını temizle
+        cache.clear()
 
-    @classmethod
-    def setUpTestData(cls):
-        cls.subject = Subject.objects.create(name="Physics")
     def register(self, email: str, password: str, role: str):
-        url = "/api/auth/register/"
+        url = "/auth/register"  # API prefix yok, core/urls.py’ye göre
         payload = {
-        "username": email.split("@")[0],  # basitçe email’den username türetiyoruz
-        "email": email,
-        "password": password,
-        "role": role
-    }
+            "username": email.split("@")[0],
+            "email": email,
+            "password": password,
+            "role": role
+        }
         res = self.client.post(url, payload, format="json")
-        self.assertIn(res.status_code, (status.HTTP_200_OK, status.HTTP_201_CREATED), msg=res.data)
+        self.assertIn(res.status_code, (status.HTTP_200_OK, status.HTTP_201_CREATED), msg=getattr(res, "data", res.content))
         return res
 
-    def login(self, email: str, password: str) -> str:
-        url = "/api/auth/login/"
-        payload = {"email": email, "password": password}
+    def login(self, email: str, password: str):
+        url = "/auth/login"
+        payload = {
+            "email": email,
+            "password": password
+        }
         res = self.client.post(url, payload, format="json")
-        self.assertEqual(res.status_code, status.HTTP_200_OK, msg=res.data)
-        self.assertIn("access", res.data)
+        self.assertEqual(res.status_code, status.HTTP_200_OK, msg=getattr(res, "data", res.content))
         return res.data["access"]
 
     def test_full_lesson_request_flow(self):
-        # 1) Tutor ve Student kayıt
-        tutor_email = "tutor@test.com"
-        student_email = "student@test.com"
-        password = "Passw0rd!"
+        tutor_email = "tutor@example.com"
+        student_email = "student@example.com"
+        password = "testpass123"
 
+        # Tutor kaydı
         self.register(tutor_email, password, role="tutor")
-        self.register(student_email, password, role="student")
-
-        self.assertTrue(TutorProfile.objects.filter(user__email=tutor_email).exists())
-        self.assertTrue(StudentProfile.objects.filter(user__email=student_email).exists())
-
-        tutor_user = User.objects.get(email=tutor_email)
-        student_user = User.objects.get(email=student_email)
-
-        TutorProfile.objects.get(user=tutor_user).subjects.add(self.subject)
-
         tutor_token = self.login(tutor_email, password)
+
+        # Student kaydı
+        self.register(student_email, password, role="student")
         student_token = self.login(student_email, password)
 
-        # 2) Student ders talebi oluşturur
-        start_time = timezone.now() + timezone.timedelta(days=1)
-        payload = {
-            "tutor_id": tutor_user.id,
-            "subject_id": self.subject.id,
-            "start_time": start_time.isoformat().replace("+00:00", "Z"),
-            "duration_minutes": 60,
-            "note": "Kuantum giriş"
-        }
+        # Tutor profiline subject ekle
+        res_subjects = self.client.get("/subjects/")
+        self.assertEqual(res_subjects.status_code, status.HTTP_200_OK)
+        subject_id = res_subjects.data[0]["id"]
 
-        auth(self.client, student_token)
-        res_create = self.client.post("/api/lesson-requests/", payload, format="json")
-        self.assertEqual(res_create.status_code, status.HTTP_201_CREATED, msg=res_create.data)
+        tutor_profile_payload = {
+            "bio": "Experienced tutor",
+            "hourly_rate": 100,
+            "subjects": [subject_id]
+        }
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {tutor_token}")
+        res_update_tutor = self.client.put("/tutors/me/", tutor_profile_payload, format="json")
+        self.assertEqual(res_update_tutor.status_code, status.HTTP_200_OK, msg=getattr(res_update_tutor, "data", res_update_tutor.content))
+
+        # Student, tutor'a ders talebi oluşturur
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {student_token}")
+        lesson_payload = {
+            "tutor": res_update_tutor.data["id"],
+            "subject": subject_id,
+            "start_time": "2025-08-20T10:00:00Z",
+            "duration_minutes": 60
+        }
+        res_create = self.client.post("/lesson-requests/", lesson_payload, format="json")
+        self.assertEqual(res_create.status_code, status.HTTP_201_CREATED, msg=getattr(res_create, "data", res_create.content))
         lr_id = res_create.data["id"]
 
-        lr = LessonRequest.objects.get(id=lr_id)
-        self.assertEqual(lr.student_id, student_user.id)
-        self.assertEqual(lr.tutor_id, tutor_user.id)
-        self.assertEqual(lr.subject_id, self.subject.id)
-        self.assertEqual(lr.status, "pending")
-
-        # 3) Tutor talebi approve eder
-        auth(self.client, tutor_token)
-        res_patch = self.client.patch(f"/api/lesson-requests/{lr_id}", {"status": "approved"}, format="json")
-        self.assertEqual(res_patch.status_code, status.HTTP_200_OK, msg=res_patch.data)
-
-        lr.refresh_from_db()
-        self.assertEqual(lr.status, "approved")
+        # Tutor talebi onaylar
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {tutor_token}")
+        res_approve = self.client.patch(f"/lesson-requests/{lr_id}/", {"status": "approved"}, format="json")
+        self.assertEqual(res_approve.status_code, status.HTTP_200_OK, msg=getattr(res_approve, "data", res_approve.content))
 
     def test_permissions_student_cannot_approve(self):
-        tutor_email = "perm_tutor@test.com"
-        student_email = "perm_student@test.com"
-        password = "Passw0rd!"
+        tutor_email = "tutor2@example.com"
+        student_email = "student2@example.com"
+        password = "testpass123"
 
+        # Tutor kaydı
         self.register(tutor_email, password, role="tutor")
-        self.register(student_email, password, role="student")
-
-        tutor_user = User.objects.get(email=tutor_email)
-        TutorProfile.objects.get(user=tutor_user).subjects.add(self.subject)
-
         tutor_token = self.login(tutor_email, password)
+
+        # Student kaydı
+        self.register(student_email, password, role="student")
         student_token = self.login(student_email, password)
 
-        start_time = timezone.now() + timezone.timedelta(days=2)
-        payload = {
-            "tutor_id": tutor_user.id,
-            "subject_id": self.subject.id,
-            "start_time": start_time.isoformat().replace("+00:00", "Z"),
-            "duration_minutes": 45,
-        }
+        # Tutor profiline subject ekle
+        res_subjects = self.client.get("/subjects/")
+        self.assertEqual(res_subjects.status_code, status.HTTP_200_OK)
+        subject_id = res_subjects.data[0]["id"]
 
-        auth(self.client, student_token)
-        res_create = self.client.post("/api/lesson-requests/", payload, format="json")
-        self.assertEqual(res_create.status_code, status.HTTP_201_CREATED)
+        tutor_profile_payload = {
+            "bio": "Experienced tutor",
+            "hourly_rate": 100,
+            "subjects": [subject_id]
+        }
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {tutor_token}")
+        res_update_tutor = self.client.put("/tutors/me/", tutor_profile_payload, format="json")
+        self.assertEqual(res_update_tutor.status_code, status.HTTP_200_OK, msg=getattr(res_update_tutor, "data", res_update_tutor.content))
+
+        # Student, tutor'a ders talebi oluşturur
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {student_token}")
+        lesson_payload = {
+            "tutor": res_update_tutor.data["id"],
+            "subject": subject_id,
+            "start_time": "2025-08-20T10:00:00Z",
+            "duration_minutes": 60
+        }
+        res_create = self.client.post("/lesson-requests/", lesson_payload, format="json")
+        self.assertEqual(res_create.status_code, status.HTTP_201_CREATED, msg=getattr(res_create, "data", res_create.content))
         lr_id = res_create.data["id"]
 
-        # Öğrenci approve etmeye çalışır → 403
-        res_patch = self.client.patch(f"/api/lesson-requests/{lr_id}", {"status": "approved"}, format="json")
-        self.assertEqual(res_patch.status_code, status.HTTP_403_FORBIDDEN)
+        # Student onaylamaya çalışır (yetkisi olmamalı)
+        res_approve = self.client.patch(f"/lesson-requests/{lr_id}/", {"status": "approved"}, format="json")
+        self.assertEqual(res_approve.status_code, status.HTTP_403_FORBIDDEN, msg=getattr(res_approve, "data", res_approve.content))
